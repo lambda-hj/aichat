@@ -49,19 +49,44 @@ class AudioTrackProcessor(MediaStreamTrack):
         print(f"Audio recording started: {self.filepath}")
 
     async def recv(self):
-        frame = await self.track.recv()
-        
-        # Save audio data to file
-        if self.audio_file and frame.format.name == "s16":
-            sound_data = bytes(frame.to_ndarray().tobytes())
-            self.audio_file.writeframes(sound_data)
-        
-        return frame
+        try:
+            frame = await self.track.recv()
+            
+            # Save audio data to file
+            if self.audio_file:
+                # Try to convert any format to audio data
+                if frame.format.name == "s16":
+                    # Direct conversion for s16 format
+                    sound_data = bytes(frame.to_ndarray().tobytes())
+                    self.audio_file.writeframes(sound_data)
+                elif hasattr(frame, 'to_ndarray'):
+                    # Try to convert other formats
+                    try:
+                        # Convert to s16 format if possible
+                        audio_frame = frame.to_ndarray()
+                        sound_data = bytes(audio_frame.tobytes())
+                        self.audio_file.writeframes(sound_data)
+                    except Exception as e:
+                        print(f"Could not convert audio frame: {e}")
+            
+            return frame
+        except Exception as e:
+            print(f"Error in audio processing: {e}")
+            # Return the original frame or an empty one if needed
+            if 'frame' in locals():
+                return frame
+            else:
+                from av import AudioFrame
+                return AudioFrame.empty()
     
     def stop(self):
-        if self.audio_file:
-            self.audio_file.close()
-            print(f"Audio recording stopped: {self.filepath}")
+        try:
+            if self.audio_file:
+                self.audio_file.close()
+                print(f"Audio recording stopped: {self.filepath}")
+                self.audio_file = None
+        except Exception as e:
+            print(f"Error stopping audio recording: {e}")
             self.audio_file = None
 
 
@@ -76,7 +101,8 @@ class VideoTrackProcessor(MediaStreamTrack):
         self.track = track
         self.user_id = user_id
         self.timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.filename = f"{self.user_id}_{self.timestamp}.mp4"
+        # Change to .avi for better codec compatibility
+        self.filename = f"{self.user_id}_{self.timestamp}.avi"
         self.filepath = VIDEO_ROOT / self.filename
         
         # Create video writer
@@ -86,31 +112,68 @@ class VideoTrackProcessor(MediaStreamTrack):
         print(f"Video recording prepared: {self.filepath}")
 
     async def recv(self):
-        frame = await self.track.recv()
-        
-        # Initialize video writer on first frame
-        if self.writer is None and frame.width and frame.height:
-            self.frame_size = (frame.width, frame.height)
-            self.writer = cv2.VideoWriter(
-                str(self.filepath),
-                cv2.VideoWriter_fourcc(*'mp4v'),
-                30.0,  # FPS
-                self.frame_size
-            )
-            print(f"Video recording started: {self.filepath}")
-        
-        # Save video frame
-        if self.writer:
-            # Convert frame to BGR format for OpenCV
-            img = frame.to_ndarray(format="bgr24")
-            self.writer.write(img)
-        
-        return frame
+        try:
+            frame = await self.track.recv()
+            
+            # Initialize video writer on first frame
+            if self.writer is None and frame.width and frame.height:
+                self.frame_size = (frame.width, frame.height)
+                
+                # Try different codecs in order of preference
+                # Change file extension to .avi for better compatibility
+                self.filepath = self.filepath.with_suffix('.avi')
+                
+                # Try XVID codec (more widely supported)
+                self.writer = cv2.VideoWriter(
+                    str(self.filepath),
+                    cv2.VideoWriter_fourcc(*'XVID'),
+                    30.0,  # FPS
+                    self.frame_size
+                )
+                
+                # Verify the writer opened successfully
+                if not self.writer.isOpened():
+                    # Fallback to mp4v if XVID failed
+                    self.writer = cv2.VideoWriter(
+                        str(self.filepath),
+                        cv2.VideoWriter_fourcc(*'mp4v'),
+                        30.0,  # FPS
+                        self.frame_size
+                    )
+                
+                # Final check if writer is opened
+                if self.writer.isOpened():
+                    print(f"Video recording started: {self.filepath}")
+                else:
+                    print(f"Failed to initialize video writer for: {self.filepath}")
+            
+            # Save video frame
+            if self.writer and self.writer.isOpened():
+                try:
+                    # Convert frame to BGR format for OpenCV
+                    img = frame.to_ndarray(format="bgr24")
+                    self.writer.write(img)
+                except Exception as e:
+                    print(f"Error writing video frame: {e}")
+            
+            return frame
+        except Exception as e:
+            print(f"Error in video processing: {e}")
+            # Return the original frame or an empty one if needed
+            if 'frame' in locals():
+                return frame
+            else:
+                from av import VideoFrame
+                return VideoFrame.empty()
     
     def stop(self):
-        if self.writer:
-            self.writer.release()
-            print(f"Video recording stopped: {self.filepath}")
+        try:
+            if self.writer:
+                self.writer.release()
+                print(f"Video recording stopped: {self.filepath}")
+                self.writer = None
+        except Exception as e:
+            print(f"Error stopping video recording: {e}")
             self.writer = None
 
 
