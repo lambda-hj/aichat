@@ -54,17 +54,39 @@ class AudioTrackProcessor(MediaStreamTrack):
             
             # Save audio data to file
             if self.audio_file:
+                # Get the frame's sample rate
+                frame_sample_rate = getattr(frame, 'sample_rate', self.sample_rate)
+                
                 # Try to convert any format to audio data
                 if frame.format.name == "s16":
                     # Direct conversion for s16 format
-                    sound_data = bytes(frame.to_ndarray().tobytes())
+                    audio_data = frame.to_ndarray()
+                    
+                    # Resample if needed
+                    if frame_sample_rate != self.sample_rate:
+                        print(f"Resampling audio from {frame_sample_rate}Hz to {self.sample_rate}Hz")
+                        # Simple resampling approach - convert the audio data to the right format
+                        # This preserves the pitch by adjusting the data length
+                        resampled_data = self._resample_audio(audio_data, frame_sample_rate, self.sample_rate)
+                        sound_data = bytes(resampled_data.tobytes())
+                    else:
+                        sound_data = bytes(audio_data.tobytes())
+                    
                     self.audio_file.writeframes(sound_data)
                 elif hasattr(frame, 'to_ndarray'):
                     # Try to convert other formats
                     try:
                         # Convert to s16 format if possible
-                        audio_frame = frame.to_ndarray()
-                        sound_data = bytes(audio_frame.tobytes())
+                        audio_data = frame.to_ndarray()
+                        
+                        # Resample if needed
+                        if frame_sample_rate != self.sample_rate:
+                            print(f"Resampling audio from {frame_sample_rate}Hz to {self.sample_rate}Hz")
+                            resampled_data = self._resample_audio(audio_data, frame_sample_rate, self.sample_rate)
+                            sound_data = bytes(resampled_data.tobytes())
+                        else:
+                            sound_data = bytes(audio_data.tobytes())
+                        
                         self.audio_file.writeframes(sound_data)
                     except Exception as e:
                         print(f"Could not convert audio frame: {e}")
@@ -88,6 +110,40 @@ class AudioTrackProcessor(MediaStreamTrack):
         except Exception as e:
             print(f"Error stopping audio recording: {e}")
             self.audio_file = None
+            
+    def _resample_audio(self, audio_data, src_rate, dst_rate):
+        """
+        Resample audio data from source rate to destination rate.
+        This is a simple implementation to correct pitch issues.
+        
+        Args:
+            audio_data: The audio data as numpy array
+            src_rate: Source sample rate
+            dst_rate: Destination sample rate
+            
+        Returns:
+            Resampled audio data as numpy array
+        """
+        try:
+            import numpy as np
+            from scipy import signal
+            
+            # Calculate number of samples for target rate
+            n_samples = int(len(audio_data) * dst_rate / src_rate)
+            
+            # Resample using scipy's resample function
+            resampled = signal.resample(audio_data, n_samples)
+            return resampled
+        except ImportError:
+            print("Could not import scipy for proper resampling. Using basic method.")
+            # Fallback to a very basic resampling method if scipy is not available
+            # This isn't ideal but better than nothing
+            ratio = dst_rate / src_rate
+            import numpy as np
+            
+            # Basic resampling by linear interpolation
+            indices = np.round(np.linspace(0, len(audio_data) - 1, int(len(audio_data) * ratio))).astype(int)
+            return audio_data[indices]
 
 
 class VideoTrackProcessor(MediaStreamTrack):
