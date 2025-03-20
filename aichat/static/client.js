@@ -65,13 +65,47 @@ async function start() {
             };
         }
         
-        localStream = await navigator.mediaDevices.getUserMedia({
-            audio: true,
-            video: {
-                width: { ideal: 640 },
-                height: { ideal: 480 }
+        try {
+            // Try to get both audio and video
+            localStream = await navigator.mediaDevices.getUserMedia({
+                audio: true,
+                video: {
+                    width: { ideal: 640 },
+                    height: { ideal: 480 }
+                }
+            });
+            console.log("Successfully got audio and video tracks");
+        } catch (e) {
+            console.warn("Could not get both audio and video: " + e.message);
+            try {
+                // Fall back to just audio if video fails
+                localStream = await navigator.mediaDevices.getUserMedia({
+                    audio: true,
+                    video: false
+                });
+                console.log("Using audio only");
+            } catch (audioError) {
+                console.warn("Could not get audio: " + audioError.message);
+                // Last resort - create empty stream with no tracks
+                localStream = new MediaStream();
+                console.log("Using empty media stream - will use synthetic media from server");
+                
+                // Add a dummy audio track to the stream
+                try {
+                    // Create an audio context and oscillator for a dummy audio track
+                    const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                    const oscillator = audioCtx.createOscillator();
+                    const dst = audioCtx.createMediaStreamDestination();
+                    oscillator.connect(dst);
+                    oscillator.start();
+                    const dummyAudioTrack = dst.stream.getAudioTracks()[0];
+                    localStream.addTrack(dummyAudioTrack);
+                    console.log("Added dummy audio track");
+                } catch (dummyError) {
+                    console.warn("Could not create dummy audio track: " + dummyError.message);
+                }
             }
-        });
+        }
 
         // Display local video
         localVideo.srcObject = localStream;
@@ -82,10 +116,17 @@ async function start() {
             iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
         });
 
-        // Add local tracks to peer connection
-        localStream.getTracks().forEach(track => {
-            pc.addTrack(track, localStream);
-        });
+        // Add local tracks to peer connection (if any)
+        const tracks = localStream.getTracks();
+        if (tracks.length > 0) {
+            tracks.forEach(track => {
+                pc.addTrack(track, localStream);
+            });
+        } else {
+            console.warn("No local tracks available, server will use synthetic media");
+            // Create a dummy data channel to establish connection
+            pc.createDataChannel("dummy");
+        }
 
         // Create offer
         const offer = await pc.createOffer();
@@ -104,14 +145,24 @@ async function start() {
         });
 
         // Get answer from server
-        const answer = await response.json();
-        await pc.setRemoteDescription(answer);
-
-        // Update UI
-        startButton.disabled = true;
-        stopButton.disabled = false;
-        statusDiv.textContent = 'Status: Connected - Recording in progress';
-        statusDiv.className = 'status connected';
+        try {
+            const answer = await response.json();
+            
+            // Check if server returned an error
+            if (answer.error) {
+                throw new Error(answer.error);
+            }
+            
+            await pc.setRemoteDescription(new RTCSessionDescription(answer));
+            
+            // Update UI
+            startButton.disabled = true;
+            stopButton.disabled = false;
+            statusDiv.textContent = 'Status: Connected - Recording in progress';
+            statusDiv.className = 'status connected';
+        } catch (e) {
+            throw new Error(`Failed to parse SessionDescription: ${e.message}`);
+        }
 
         // Monitor connection state
         pc.addEventListener('connectionstatechange', () => {

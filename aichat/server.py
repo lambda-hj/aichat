@@ -1,6 +1,7 @@
 import asyncio
 import datetime
 import os
+import platform  # Add platform detection
 import uuid
 import wave
 from pathlib import Path
@@ -10,227 +11,110 @@ import av
 import cv2
 from aiohttp import web
 from aiortc import MediaStreamTrack, RTCPeerConnection, RTCSessionDescription
-from aiortc.contrib.media import MediaBlackhole, MediaRecorder, MediaRelay
+from aiortc.contrib.media import MediaBlackhole, MediaPlayer, MediaRecorder, MediaRelay
 
 # Paths for storing recordings
 AUDIO_ROOT = Path(__file__).parent / "recordings" / "audio"
 VIDEO_ROOT = Path(__file__).parent / "recordings" / "video"
+RECORDING_ROOT = Path(__file__).parent / "recordings"
 
 # Ensure directories exist
 AUDIO_ROOT.mkdir(parents=True, exist_ok=True)
 VIDEO_ROOT.mkdir(parents=True, exist_ok=True)
+RECORDING_ROOT.mkdir(parents=True, exist_ok=True)
 
 # Store active peer connections
 pcs = set()
 relay = MediaRelay()
 
-class AudioTrackProcessor(MediaStreamTrack):
-    """
-    A track that receives an audio track and saves it to disk.
-    """
-    kind = "audio"
+# Store active recorders
+recorders = {}
 
-    def __init__(self, track, user_id):
-        super().__init__()
-        self.track = track
-        self.user_id = user_id
-        self.audio_file = None
-        self.sample_rate = 48000
-        self.timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.filename = f"{self.user_id}_{self.timestamp}.wav"
-        self.filepath = AUDIO_ROOT / self.filename
-        
-        # Create WAV file
-        self.audio_file = wave.open(str(self.filepath), "wb")
-        self.audio_file.setnchannels(1)  # Mono
-        self.audio_file.setsampwidth(2)  # 16-bit
-        self.audio_file.setframerate(self.sample_rate)
-        
-        print(f"Audio recording started: {self.filepath}")
+# Global webcam players
+webcam = None
 
-    async def recv(self):
-        try:
-            frame = await self.track.recv()
-            
-            # Save audio data to file
-            if self.audio_file:
-                # Get the frame's sample rate
-                frame_sample_rate = getattr(frame, 'sample_rate', self.sample_rate)
-                
-                # Try to convert any format to audio data
-                if frame.format.name == "s16":
-                    # Direct conversion for s16 format
-                    audio_data = frame.to_ndarray()
-                    
-                    # Resample if needed
-                    if frame_sample_rate != self.sample_rate:
-                        print(f"Resampling audio from {frame_sample_rate}Hz to {self.sample_rate}Hz")
-                        # Simple resampling approach - convert the audio data to the right format
-                        # This preserves the pitch by adjusting the data length
-                        resampled_data = self._resample_audio(audio_data, frame_sample_rate, self.sample_rate)
-                        sound_data = bytes(resampled_data.tobytes())
-                    else:
-                        sound_data = bytes(audio_data.tobytes())
-                    
-                    self.audio_file.writeframes(sound_data)
-                elif hasattr(frame, 'to_ndarray'):
-                    # Try to convert other formats
-                    try:
-                        # Convert to s16 format if possible
-                        audio_data = frame.to_ndarray()
-                        
-                        # Resample if needed
-                        if frame_sample_rate != self.sample_rate:
-                            print(f"Resampling audio from {frame_sample_rate}Hz to {self.sample_rate}Hz")
-                            resampled_data = self._resample_audio(audio_data, frame_sample_rate, self.sample_rate)
-                            sound_data = bytes(resampled_data.tobytes())
-                        else:
-                            sound_data = bytes(audio_data.tobytes())
-                        
-                        self.audio_file.writeframes(sound_data)
-                    except Exception as e:
-                        print(f"Could not convert audio frame: {e}")
-            
-            return frame
-        except Exception as e:
-            print(f"Error in audio processing: {e}")
-            # Return the original frame or an empty one if needed
-            if 'frame' in locals():
-                return frame
-            else:
-                from av import AudioFrame
-                return AudioFrame.empty()
+def create_local_tracks(play_from=None):
+    """
+    Create media tracks for WebRTC.
     
-    def stop(self):
-        try:
-            if self.audio_file:
-                self.audio_file.close()
-                print(f"Audio recording stopped: {self.filepath}")
-                self.audio_file = None
-        except Exception as e:
-            print(f"Error stopping audio recording: {e}")
-            self.audio_file = None
-            
-    def _resample_audio(self, audio_data, src_rate, dst_rate):
-        """
-        Resample audio data from source rate to destination rate.
-        This is a simple implementation to correct pitch issues.
+    Args:
+        play_from: Optional file path to play media from instead of live camera/mic
         
-        Args:
-            audio_data: The audio data as numpy array
-            src_rate: Source sample rate
-            dst_rate: Destination sample rate
-            
-        Returns:
-            Resampled audio data as numpy array
-        """
-        try:
-            import numpy as np
-            from scipy import signal
-            
-            # Calculate number of samples for target rate
-            n_samples = int(len(audio_data) * dst_rate / src_rate)
-            
-            # Resample using scipy's resample function
-            resampled = signal.resample(audio_data, n_samples)
-            return resampled
-        except ImportError:
-            print("Could not import scipy for proper resampling. Using basic method.")
-            # Fallback to a very basic resampling method if scipy is not available
-            # This isn't ideal but better than nothing
-            ratio = dst_rate / src_rate
-            import numpy as np
-            
-            # Basic resampling by linear interpolation
-            indices = np.round(np.linspace(0, len(audio_data) - 1, int(len(audio_data) * ratio))).astype(int)
-            return audio_data[indices]
-
-
-class VideoTrackProcessor(MediaStreamTrack):
+    Returns:
+        Tuple of (audio_track, video_track)
     """
-    A track that receives a video track and saves it to disk.
-    """
-    kind = "video"
-
-    def __init__(self, track, user_id):
-        super().__init__()
-        self.track = track
-        self.user_id = user_id
-        self.timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        # Change to .avi for better codec compatibility
-        self.filename = f"{self.user_id}_{self.timestamp}.avi"
-        self.filepath = VIDEO_ROOT / self.filename
-        
-        # Create video writer
-        self.writer = None
-        self.frame_size = None
-        
-        print(f"Video recording prepared: {self.filepath}")
-
-    async def recv(self):
+    global relay, webcam
+    
+    # If playing from a file
+    if play_from:
+        player = MediaPlayer(play_from)
+        return player.audio, player.video
+    
+    # For live media
+    options = {"framerate": "30", "video_size": "640x480"}
+    audio_options = {"channels": "1", "sample_rate": "48000"}
+    
+    if webcam is None:
         try:
-            frame = await self.track.recv()
-            
-            # Initialize video writer on first frame
-            if self.writer is None and frame.width and frame.height:
-                self.frame_size = (frame.width, frame.height)
-                
-                # Try different codecs in order of preference
-                # Change file extension to .avi for better compatibility
-                self.filepath = self.filepath.with_suffix('.avi')
-                
-                # Try XVID codec (more widely supported)
-                self.writer = cv2.VideoWriter(
-                    str(self.filepath),
-                    cv2.VideoWriter_fourcc(*'XVID'),
-                    30.0,  # FPS
-                    self.frame_size
+            # Try platform-specific camera sources
+            if platform.system() == "Darwin":  # macOS
+                webcam = MediaPlayer(
+                    "default:default", format="avfoundation", options={**options, **audio_options}
+                )
+            elif platform.system() == "Windows":
+                webcam = MediaPlayer(
+                    "audio=Microphone (Realtek Audio):video=Integrated Camera", 
+                    format="dshow", 
+                    options={**options, **audio_options}
+                )
+            else:  # Linux
+                webcam = MediaPlayer(
+                    "default:v4l2:/dev/video0", 
+                    format="v4l2", 
+                    options={**options, **audio_options}
                 )
                 
-                # Verify the writer opened successfully
-                if not self.writer.isOpened():
-                    # Fallback to mp4v if XVID failed
-                    self.writer = cv2.VideoWriter(
-                        str(self.filepath),
-                        cv2.VideoWriter_fourcc(*'mp4v'),
-                        30.0,  # FPS
-                        self.frame_size
-                    )
+            # Check if tracks are available
+            if webcam.audio is None and webcam.video is None:
+                raise ValueError("No audio or video tracks available from devices")
                 
-                # Final check if writer is opened
-                if self.writer.isOpened():
-                    print(f"Video recording started: {self.filepath}")
-                else:
-                    print(f"Failed to initialize video writer for: {self.filepath}")
-            
-            # Save video frame
-            if self.writer and self.writer.isOpened():
-                try:
-                    # Convert frame to BGR format for OpenCV
-                    img = frame.to_ndarray(format="bgr24")
-                    self.writer.write(img)
-                except Exception as e:
-                    print(f"Error writing video frame: {e}")
-            
-            return frame
         except Exception as e:
-            print(f"Error in video processing: {e}")
-            # Return the original frame or an empty one if needed
-            if 'frame' in locals():
-                return frame
-            else:
-                from av import VideoFrame
-                return VideoFrame.empty()
+            print(f"Could not access camera/microphone: {e}, using test sources instead")
+            # Fall back to test sources
+            audio_src = MediaPlayer(
+                "anullsrc=r=48000:cl=mono", 
+                format="lavfi", 
+                options={"sample_rate": "48000", "channels": "1"}
+            )
+            video_src = MediaPlayer(
+                "testsrc=size=640x480:rate=30", 
+                format="lavfi"
+            )
+            return audio_src.audio, video_src.video
     
-    def stop(self):
-        try:
-            if self.writer:
-                self.writer.release()
-                print(f"Video recording stopped: {self.filepath}")
-                self.writer = None
-        except Exception as e:
-            print(f"Error stopping video recording: {e}")
-            self.writer = None
+    # If we have a webcam but one of the tracks is missing, create synthetic ones
+    audio_track = webcam.audio
+    video_track = webcam.video
+    
+    if audio_track is None:
+        print("Creating synthetic audio source as fallback")
+        audio_src = MediaPlayer(
+            "anullsrc=r=48000:cl=mono", 
+            format="lavfi", 
+            options={"sample_rate": "48000", "channels": "1"}
+        )
+        audio_track = audio_src.audio
+        
+    if video_track is None:
+        print("Creating synthetic video source as fallback")
+        video_src = MediaPlayer(
+            "testsrc=size=640x480:rate=30", 
+            format="lavfi"
+        )
+        video_track = video_src.video
+
+    # Return both tracks with relay to allow multiple consumers
+    return relay.subscribe(audio_track), relay.subscribe(video_track)
 
 
 async def index(request):
@@ -247,65 +131,109 @@ async def javascript(request):
 
 async def offer(request):
     """Handle WebRTC offer from client"""
-    params = await request.json()
-    offer = RTCSessionDescription(sdp=params["sdp"], type=params["type"])
-    
-    # Generate a unique ID for this user session
-    user_id = str(uuid.uuid4())
-    
-    # Create a new peer connection
-    pc = RTCPeerConnection()
-    pcs.add(pc)
-    
-    # Track processors
-    audio_processor = None
-    video_processor = None
-    
-    @pc.on("connectionstatechange")
-    async def on_connectionstatechange():
-        print(f"Connection state is {pc.connectionState}")
-        if pc.connectionState == "failed":
-            await pc.close()
-            pcs.discard(pc)
+    try:
+        params = await request.json()
+        offer = RTCSessionDescription(sdp=params["sdp"], type=params["type"])
+        
+        # Generate a unique ID for this user session
+        user_id = str(uuid.uuid4())
+        print(f"New WebRTC connection from user: {user_id}")
+        
+        # Create a new peer connection
+        pc = RTCPeerConnection()
+        pcs.add(pc)
+        
+        # Create a recorder for this session
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        recorder_path = str(RECORDING_ROOT / f"{user_id}_{timestamp}.mp4")
+        print(f"Creating recorder at path: {recorder_path}")
+        
+        # Create recorder with proper options for audio/video
+        recorder = MediaRecorder(
+            recorder_path,
+            format="mp4"  # Use mp4 container format
+        )
+        recorders[user_id] = recorder
+        
+        # Create local media tracks
+        try:
+            local_audio, local_video = create_local_tracks()
+        except Exception as e:
+            print(f"Error creating local tracks: {e}")
+            local_audio, local_video = None, None
+        
+        @pc.on("connectionstatechange")
+        async def on_connectionstatechange():
+            print(f"Connection state is {pc.connectionState}")
+            if pc.connectionState == "failed" or pc.connectionState == "closed":
+                await pc.close()
+                pcs.discard(pc)
+                
+                # Stop recording
+                if user_id in recorders:
+                    rec = recorders.pop(user_id)
+                    if hasattr(rec, '_started') and rec._started:
+                        print(f"Stopping recording: {recorder_path}")
+                        await rec.stop()
+                        print(f"Recording stopped: {recorder_path}")
+                    
+        @pc.on("track")
+        def on_track(track):
+            print(f"Track {track.kind} received from peer: {track.kind}")
             
-            # Stop recording
-            if audio_processor:
-                audio_processor.stop()
-            if video_processor:
-                video_processor.stop()
-    
-    @pc.on("track")
-    def on_track(track):
-        print(f"Track {track.kind} received")
+            # Add the track to the recorder
+            recorder.addTrack(track)
+            
+            # Start the recorder when we get the first track
+            if not hasattr(recorder, '_started') or not recorder._started:
+                print(f"Starting recording to {recorder_path}")
+                asyncio.ensure_future(recorder.start())
+            
+            # Send back appropriate track to peer (for preview)
+            if track.kind == "audio":
+                # Use local audio if available, otherwise echo back
+                if local_audio:
+                    pc.addTrack(local_audio)
+                else:
+                    pc.addTrack(relay.subscribe(track))
+            elif track.kind == "video":
+                # Use local video if available, otherwise echo back
+                if local_video:
+                    pc.addTrack(local_video)
+                else:
+                    pc.addTrack(relay.subscribe(track))
         
-        nonlocal audio_processor, video_processor
+        # Handle the offer
+        await pc.setRemoteDescription(offer)
         
-        if track.kind == "audio":
-            audio_processor = AudioTrackProcessor(relay.subscribe(track), user_id)
-            pc.addTrack(audio_processor)
-        elif track.kind == "video":
-            video_processor = VideoTrackProcessor(relay.subscribe(track), user_id)
-            pc.addTrack(video_processor)
-    
-    # Handle the offer
-    await pc.setRemoteDescription(offer)
-    
-    # Create answer
-    answer = await pc.createAnswer()
-    await pc.setLocalDescription(answer)
-    
-    return web.json_response({
-        "sdp": pc.localDescription.sdp,
-        "type": pc.localDescription.type
-    })
+        # Create answer
+        answer = await pc.createAnswer()
+        await pc.setLocalDescription(answer)
+        
+        return web.json_response({
+            "sdp": pc.localDescription.sdp,
+            "type": pc.localDescription.type
+        })
+    except Exception as e:
+        print(f"Error handling offer: {e}")
+        import traceback
+        traceback.print_exc()
+        return web.json_response({"error": str(e)}, status=400)
 
 
 async def on_shutdown(app):
-    """Close peer connections on shutdown"""
+    """Close peer connections and recorders on shutdown"""
     # Close peer connections
     coros = [pc.close() for pc in pcs]
+    
+    # Close recorders
+    for user_id, recorder in recorders.items():
+        if recorder.started:
+            coros.append(recorder.stop())
+    
     await asyncio.gather(*coros)
     pcs.clear()
+    recorders.clear()
 
 
 def create_app():
