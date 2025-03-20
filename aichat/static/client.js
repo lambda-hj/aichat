@@ -15,30 +15,46 @@ stopButton.addEventListener('click', stop);
 // Start WebRTC connection
 async function start() {
     try {
-        // Check if mediaDevices is supported
+        // Check if mediaDevices is supported and provide polyfill if needed
         if (!navigator.mediaDevices) {
-            // The adapter.js should have polyfilled this, but add extra fallback
-            console.warn('MediaDevices API not directly supported, adapter.js should provide polyfill');
-            // Try to use adapter.js polyfill instead of throwing an error
+            console.warn('MediaDevices API not directly supported, creating polyfill');
             navigator.mediaDevices = {};
         }
         
-        // Get user media (audio and video)
+        // Polyfill getUserMedia based on Chrome developer documentation
         if (!navigator.mediaDevices.getUserMedia) {
             navigator.mediaDevices.getUserMedia = function(constraints) {
-                // First, try the MediaDevices.getUserMedia method
-                const getUserMedia = navigator.webkitGetUserMedia || navigator.mozGetUserMedia || 
-                                   navigator.msGetUserMedia;
+                // Get the legacy API versions if they exist
+                const getUserMedia = navigator.webkitGetUserMedia ||
+                                     navigator.mozGetUserMedia ||
+                                     navigator.msGetUserMedia;
                 
-                // Some browsers don't implement it - return a rejected promise with an error
+                // If no legacy API exists, return a rejected promise
                 if (!getUserMedia) {
-                    return Promise.reject(new Error('getUserMedia is not implemented in this browser'));
+                    const error = new Error('getUserMedia is not supported in this browser');
+                    error.name = 'NotSupportedError';
+                    return Promise.reject(error);
                 }
                 
-                // Otherwise, wrap the call to the old navigator.getUserMedia with a Promise
+                // Wrap the legacy API in a Promise
                 return new Promise(function(resolve, reject) {
-                    getUserMedia.call(navigator, constraints, resolve, reject);
+                    try {
+                        getUserMedia.call(navigator, 
+                            constraints,
+                            function(stream) { resolve(stream); },
+                            function(err) { reject(err); }
+                        );
+                    } catch (e) {
+                        reject(e);
+                    }
                 });
+            };
+        }
+        
+        // Add enumerateDevices polyfill if needed
+        if (!navigator.mediaDevices.enumerateDevices) {
+            navigator.mediaDevices.enumerateDevices = function() {
+                return Promise.resolve([]);
             };
         }
         
