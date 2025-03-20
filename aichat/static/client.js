@@ -15,6 +15,11 @@ stopButton.addEventListener('click', stop);
 // Start WebRTC connection
 async function start() {
     try {
+        // Check if mediaDevices is supported
+        if (!navigator.mediaDevices) {
+            throw new Error('MediaDevices API not supported in this browser');
+        }
+        
         // Get user media (audio and video)
         localStream = await navigator.mediaDevices.getUserMedia({
             audio: true,
