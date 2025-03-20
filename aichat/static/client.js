@@ -17,10 +17,31 @@ async function start() {
     try {
         // Check if mediaDevices is supported
         if (!navigator.mediaDevices) {
-            throw new Error('MediaDevices API not supported in this browser');
+            // The adapter.js should have polyfilled this, but add extra fallback
+            console.warn('MediaDevices API not directly supported, adapter.js should provide polyfill');
+            // Try to use adapter.js polyfill instead of throwing an error
+            navigator.mediaDevices = {};
         }
         
         // Get user media (audio and video)
+        if (!navigator.mediaDevices.getUserMedia) {
+            navigator.mediaDevices.getUserMedia = function(constraints) {
+                // First, try the MediaDevices.getUserMedia method
+                const getUserMedia = navigator.webkitGetUserMedia || navigator.mozGetUserMedia || 
+                                   navigator.msGetUserMedia;
+                
+                // Some browsers don't implement it - return a rejected promise with an error
+                if (!getUserMedia) {
+                    return Promise.reject(new Error('getUserMedia is not implemented in this browser'));
+                }
+                
+                // Otherwise, wrap the call to the old navigator.getUserMedia with a Promise
+                return new Promise(function(resolve, reject) {
+                    getUserMedia.call(navigator, constraints, resolve, reject);
+                });
+            };
+        }
+        
         localStream = await navigator.mediaDevices.getUserMedia({
             audio: true,
             video: {
