@@ -15,6 +15,12 @@ stopButton.addEventListener('click', stop);
 // Start WebRTC connection
 async function start() {
     try {
+        // Check if we're running in a secure context
+        if (!window.isSecureContext) {
+            console.warn('getUserMedia requires a secure context (HTTPS or localhost)');
+            // Continue anyway as we might be on localhost which is considered secure
+        }
+        
         // Check if mediaDevices is supported and provide polyfill if needed
         if (!navigator.mediaDevices) {
             console.warn('MediaDevices API not directly supported, creating polyfill');
@@ -31,6 +37,7 @@ async function start() {
                 
                 // If no legacy API exists, return a rejected promise
                 if (!getUserMedia) {
+                    console.error('No getUserMedia implementation available in this browser');
                     const error = new Error('getUserMedia is not supported in this browser');
                     error.name = 'NotSupportedError';
                     return Promise.reject(error);
@@ -117,7 +124,10 @@ async function start() {
 
     } catch (error) {
         console.error('Error starting WebRTC connection:', error);
-        statusDiv.textContent = `Status: Error - ${error.message}`;
+        const errorMessage = error.name === 'NotSupportedError' 
+            ? 'Media API not supported in this browser. Please try Chrome, Firefox, or Edge.'
+            : error.message;
+        statusDiv.textContent = `Status: Error - ${errorMessage}`;
         statusDiv.className = 'status disconnected';
     }
 }
