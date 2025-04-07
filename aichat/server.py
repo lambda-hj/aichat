@@ -57,39 +57,32 @@ class AudioTrackProcessor(MediaStreamTrack):
                 # Get the frame's sample rate
                 frame_sample_rate = getattr(frame, 'sample_rate', self.sample_rate)
                 
-                # Try to convert any format to audio data
-                if frame.format.name == "s16":
-                    # Direct conversion for s16 format
+                # Handle audio format conversion
+                try:
+                    # Get audio data in consistent format
+                    if not hasattr(frame, 'to_ndarray'):
+                        raise ValueError("Frame doesn't support ndarray conversion")
+                        
                     audio_data = frame.to_ndarray()
+                    
+                    # Ensure proper sample width (16-bit)
+                    if audio_data.dtype != np.int16:
+                        audio_data = audio_data.astype(np.int16)
                     
                     # Resample if needed
                     if frame_sample_rate != self.sample_rate:
                         print(f"Resampling audio from {frame_sample_rate}Hz to {self.sample_rate}Hz")
-                        # Simple resampling approach - convert the audio data to the right format
-                        # This preserves the pitch by adjusting the data length
                         resampled_data = self._resample_audio(audio_data, frame_sample_rate, self.sample_rate)
                         sound_data = bytes(resampled_data.tobytes())
                     else:
                         sound_data = bytes(audio_data.tobytes())
                     
                     self.audio_file.writeframes(sound_data)
-                elif hasattr(frame, 'to_ndarray'):
-                    # Try to convert other formats
-                    try:
-                        # Convert to s16 format if possible
-                        audio_data = frame.to_ndarray()
-                        
-                        # Resample if needed
-                        if frame_sample_rate != self.sample_rate:
-                            print(f"Resampling audio from {frame_sample_rate}Hz to {self.sample_rate}Hz")
-                            resampled_data = self._resample_audio(audio_data, frame_sample_rate, self.sample_rate)
-                            sound_data = bytes(resampled_data.tobytes())
-                        else:
-                            sound_data = bytes(audio_data.tobytes())
-                        
-                        self.audio_file.writeframes(sound_data)
-                    except Exception as e:
-                        print(f"Could not convert audio frame: {e}")
+                
+                except Exception as e:
+                    print(f"Error converting audio frame: {e}")
+                    # Send empty frame to continue stream
+                    return frame
             
             return frame
         except Exception as e:
